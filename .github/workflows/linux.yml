@@ -246,6 +246,9 @@ jobs:
 
     - name: Test
       working-directory: ${{runner.workspace}}/build
-      run: ctest -C ${{matrix.build_type}}
+      # Tests use separate build directories and files, so they can run in
+      # parallel. This overlaps the CMake sub-build tests (compile-error-test
+      # alone takes ~25s) with each other and with the unit tests.
+      run: ctest -C ${{matrix.build_type}} --parallel `nproc`
       env:
         CTEST_OUTPUT_ON_FAILURE: True
