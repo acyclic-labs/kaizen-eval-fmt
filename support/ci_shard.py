@@ -4,11 +4,12 @@
 Usage: ci_shard.py K/N targets|tests
 
 Run in a configured Ninja build directory. The leaf targets of `all` are
-distributed round-robin across N shards; `targets` prints the targets of
-shard K (1-based). `tests` prints a ctest regex matching the tests of shard
-K: the tests whose executable is built in that shard plus a round-robin share
-of the tests that don't have a target of their own. Together the shards build
-everything `all` does and run every test `ctest` does.
+distributed across N shards, balanced by an estimate of their compile cost;
+`targets` prints the targets of shard K (1-based). `tests` prints a ctest
+regex matching the tests of shard K: the tests whose executable is built in
+that shard plus a round-robin share of the tests that don't have a target of
+their own. Together the shards build everything `all` does and run every test
+`ctest` does.
 """
 
 import json
@@ -17,31 +18,36 @@ import re
 import subprocess
 import sys
 
+# Estimated compile cost of an object file, in bytes of source, on top of the
+# size of the source itself: every test includes fmt and gtest headers.
+OBJECT_COST = 10000
+
 
 def query(targets):
-  """Returns a dict mapping each phony target to its explicit inputs."""
+  """Returns a dict mapping each target to its explicit and other inputs."""
   out = subprocess.check_output(['ninja', '-t', 'query'] + targets, text=True)
   inputs = {}
   target = None
-  phony = False
+  section = None
   for line in out.splitlines():
     if not line.startswith(' '):
       target = line.rstrip(':')
-      phony = False
-    elif line.strip() == 'input: phony':
-      phony = True
-      inputs[target] = []
-    elif line.startswith('  ') and not line.startswith('    '):
-      phony = False
-    elif phony and not line.strip().startswith('|'):
-      inputs[target].append(line.strip())
+      inputs[target] = ([], [])
+    elif not line.startswith('    '):
+      section = line.split(':')[0].strip()
+    elif section == 'input':
+      name = line.strip()
+      if name.startswith('|'):
+        inputs[target][1].append(name.lstrip('| '))
+      else:
+        inputs[target][0].append(name)
   return inputs
 
 
 def leaf_targets(target='all'):
   """Returns the targets `target` builds, expanding phony `*all` targets."""
   leaves = []
-  for input in query([target]).get(target, []):
+  for input in query([target])[target][0]:
     if input.endswith('/all'):
       leaves += leaf_targets(input)
     else:
@@ -49,10 +55,32 @@ def leaf_targets(target='all'):
   return leaves
 
 
+def partition(leaves, count):
+  """Splits leaves into count shards with about the same compile cost."""
+  graph = query(leaves)
+  deps = {d for t in leaves for d in graph[t][1]}
+  objects = {t: [i for i in graph[t][0] if i.endswith('.o')] for t in leaves}
+  sources = query([o for t in leaves for o in objects[t]])
+  def cost(target):
+    # Targets other leaves depend on are built in every shard that needs them.
+    if target in deps:
+      return 0
+    return sum(OBJECT_COST + sum(os.path.getsize(s) for s in sources[o][0]
+                                 if os.path.isfile(s))
+               for o in objects[target])
+  shards = [[] for i in range(count)]
+  costs = [0] * count
+  for target in sorted(leaves, key=cost, reverse=True):
+    i = costs.index(min(costs))
+    shards[i].append(target)
+    costs[i] += cost(target)
+  return shards
+
+
 def main():
   shard, count = map(int, sys.argv[1].split('/'))
   leaves = leaf_targets()
-  mine = leaves[shard - 1::count]
+  mine = partition(leaves, count)[shard - 1]
   if sys.argv[2] == 'targets':
     print(' '.join(mine))
     return
