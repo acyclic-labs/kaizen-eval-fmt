@@ -13,6 +13,7 @@ jobs:
       ${{matrix.shared && 'Shared' || ''}}
       ${{matrix.cxxflags}}
       ${{matrix.sanitizers && 'ASan UBSan' || ''}}
+      ${{matrix.shard}}
     runs-on: ${{ matrix.os || 'ubuntu-22.04' }}
     env:
       # Run tests in a non-UTC timezone. glibc localtime/strftime honor TZ, so
@@ -42,12 +43,22 @@ jobs:
             std: 23
             os: ubuntu-24.04
             shared: -DBUILD_SHARED_LIBS=ON
+          # The slowest job, so its build and tests are split across two
+          # shards that together build and run everything (see ci_shard.py).
           - cxx: g++-14
             sanitizers: true
             build_type: Release
             std: 23
             os: ubuntu-24.04
             gen: Ninja
+            shard: 1/2
+          - cxx: g++-14
+            sanitizers: true
+            build_type: Release
+            std: 23
+            os: ubuntu-24.04
+            gen: Ninja
+            shard: 2/2
           - cxx: g++-16
             build_type: Debug
             std: 26
@@ -242,10 +253,23 @@ jobs:
       working-directory: ${{runner.workspace}}/build
       run: |
         threads=`nproc`
-        cmake --build . --config ${{matrix.build_type}} --parallel $threads
+        targets=
+        if [ -n "${{matrix.shard}}" ]; then
+          targets="--target $(python3 $GITHUB_WORKSPACE/support/ci_shard.py \
+            ${{matrix.shard}} targets)"
+        fi
+        cmake --build . --config ${{matrix.build_type}} --parallel $threads \
+          $targets
 
     - name: Test
       working-directory: ${{runner.workspace}}/build
-      run: ctest -C ${{matrix.build_type}}
+      run: |
+        if [ -n "${{matrix.shard}}" ]; then
+          ctest -C ${{matrix.build_type}} \
+            -R "$(python3 $GITHUB_WORKSPACE/support/ci_shard.py \
+              ${{matrix.shard}} tests)"
+        else
+          ctest -C ${{matrix.build_type}}
+        fi
       env:
         CTEST_OUTPUT_ON_FAILURE: True
